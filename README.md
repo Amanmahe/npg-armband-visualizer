@@ -25,16 +25,16 @@ All BioAmp channels share a single **global 0-based numbering** that runs across
 devices:
 
 ```
-device 1 (3CH) -> Ch0, Ch1, Ch2
-device 2 (3CH) -> Ch3, Ch4, Ch5
-device 3 (3CH) -> Ch6, Ch7, Ch8
+device 1 (3CH) -> CH1, CH2, CH3
+device 2 (3CH) -> CH4, CH5, CH6
+device 3 (3CH) -> CH7, CH8, CH9
 ```
 
 (6CH bands take six slots each.) Every selected global channel is one row in the
 shared WebGL plot, labelled `D<n> · Ch<global>` and tinted by device. Each
 device's samples are filtered with its own biquads and routed to its own
 channels via a `globalChannel → line` map, so devices streaming at slightly
-different phases don't interfere. The **Channels** popover lets you toggle
+different phases don't interfere. The **Channel Settings** (gear) popover lets you toggle
 individual channels or whole devices; by default every channel of every device
 is shown.
 

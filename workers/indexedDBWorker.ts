@@ -5,7 +5,22 @@ let canvasCount = 0;
 let selectedChannels: number[] = [];
 const CHUNK_SIZE = 1000; // Store data in chunks of 1000 arrays
 
-self.onmessage = async (event) => {
+// Handle messages strictly in order: a write reads, then updates, the file's
+// metadata, so overlapping writes to one file would lose rows, and a file list
+// requested after a write must see that write.
+let queue: Promise<void> = Promise.resolve();
+
+self.onmessage = (event) => {
+    const { action, filename } = event.data;
+    queue = queue
+        .then(() => handleMessage(event))
+        .catch((error) => {
+            console.warn(`Worker action ${action} failed:`, error);
+            self.postMessage({ action, filename, error: error instanceof Error ? error.message : `Failed: ${action}` });
+        });
+};
+
+const handleMessage = async (event: MessageEvent) => {
     const { action, data, filename, selectedChannels: channels, canvasElementCount } = event.data;
 
     // Open IndexedDB
@@ -16,7 +31,7 @@ self.onmessage = async (event) => {
     };
 
     const handleError = (error: string) => {
-        handlePostMessage({ error });
+        handlePostMessage({ action, filename, error });
     };
 
     switch (action) {
@@ -108,6 +123,8 @@ self.onmessage = async (event) => {
         default:
             handlePostMessage({ error: 'Invalid action' });
     }
+
+    db.close();
 };
 
 // Interface for metadata

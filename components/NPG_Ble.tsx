@@ -8,6 +8,8 @@ import React, {
 import { saveAs } from "file-saver";
 import { WebglPlot, ColorRGBA, WebglLine } from "webgl-plot";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Separator } from "@/components/ui/separator";
 import { EXGFilter, Notch, HighPassFilter } from "@/components/filters";
 import {
     Popover,
@@ -42,8 +44,9 @@ import {
     Moon,
     Sun,
     Activity,
-    SlidersHorizontal,
-    ListChecks,
+    Settings,
+    ReplaceAll,
+    Infinity as InfinityIcon,
 } from "lucide-react";
 import { lightThemeColors, darkThemeColors, accelColors } from "@/components/Colors";
 import { useTheme } from "next-themes";
@@ -77,6 +80,7 @@ const ACCEL_POINT_COUNT_PER_SEC = 100;
 const ACCEL_SENSITIVITY = 16384;
 const ACCEL_DISPLAY_RANGE_G = 2;
 const SAMPLE_RATE = 500;
+const MAX_RECORDING_MS = 24 * 60 * 60 * 1000;
 
 const configFromName = (name: string): DeviceConfig => {
     if (name.includes("6CH")) return { maxChannels: 6, sampleLength: 13, hasBattery: true };
@@ -127,9 +131,63 @@ const deviceChipColors = ["#38bdf8", "#a78bfa", "#fb7185", "#4ade80", "#facc15",
 
 interface CharValue extends EventTarget { value?: DataView; }
 
+const EXG_OPTIONS = [{ id: 0, label: "Off" }, { id: 4, label: "EMG" }, { id: 1, label: "ECG" }, { id: 2, label: "EOG" }, { id: 3, label: "EEG" }];
+const NOTCH_OPTIONS = [{ id: 0, label: "Off" }, { id: 1, label: "50Hz" }, { id: 2, label: "60Hz" }];
+
+// Joined button group: red when a filter group is off, green for the active filter.
+const Segmented = ({ options, value, onChange }: {
+    options: { id: number; label: string }[];
+    value: number | null;
+    onChange: (id: number) => void;
+}) => (
+    <div className="flex items-center border border-input rounded-xl overflow-hidden shrink-0">
+        {options.map((o) => (
+            <button
+                key={o.id}
+                onClick={() => onChange(o.id)}
+                aria-pressed={value === o.id}
+                className={`h-8 px-2.5 text-xs font-medium transition-colors ${value === o.id
+                    ? o.id === 0 ? "bg-red-700 text-white" : "bg-green-700 text-white"
+                    : "hover:bg-highlight"}`}
+            >
+                {o.label}
+            </button>
+        ))}
+    </div>
+);
+
+const SliderRow = ({ label, valueLabel, value, onChange }: {
+    label: string;
+    valueLabel: string;
+    value: number;
+    onChange: (v: number) => void;
+}) => (
+    <div>
+        <p className="text-xs font-semibold text-gray-500 mb-1">
+            <span className="font-bold">{label}:</span> {valueLabel}
+        </p>
+        <div className="flex items-center rounded-lg py-2 border">
+            <button className="mx-1 px-2 py-1 border rounded hover:bg-highlight" onClick={() => onChange(1)}>1</button>
+            <input
+                type="range"
+                min={1}
+                max={10}
+                value={value}
+                aria-label={label}
+                onChange={(e) => onChange(Number(e.target.value))}
+                className="flex-1 min-w-0 accent-[rgb(101,136,205)]"
+            />
+            <button className="mx-2 px-2 py-1 border rounded hover:bg-highlight" onClick={() => onChange(10)}>10</button>
+        </div>
+    </div>
+);
+
 const NPG_Ble = () => {
     const { theme, setTheme } = useTheme();
     const activeTheme: "light" | "dark" = theme === "dark" ? "dark" : "light";
+    // The theme is unknown during static prerender, so its icon waits for mount.
+    const [mounted, setMounted] = useState(false);
+    useEffect(() => { setMounted(true); }, []);
 
     // ----- device registry -----
     const devicesRef = useRef<DeviceRuntime[]>([]);
@@ -178,6 +236,13 @@ const NPG_Ble = () => {
     const recordingStartTimeRef = useRef<number>(0);
     const [isProcessingRecording, setIsProcessingRecording] = useState(false);
     const REC_FLUSH_SIZE = 500;
+    const recRowsRef = useRef<number>(0);
+    const savePendingRef = useRef<boolean>(false);
+    const endTimeRef = useRef<number | null>(null);
+    const [endTime, setEndTime] = useState<number | null>(null);
+    const [isEndTimeOpen, setIsEndTimeOpen] = useState(false);
+    const [customEndTime, setCustomEndTime] = useState("");
+    const isRecording = !isRecord;
 
     // ----- filters (keyed by global channel) -----
     const appliedEXGFiltersRef = useRef<{ [g: number]: number }>({});
@@ -202,18 +267,27 @@ const NPG_Ble = () => {
             workerRef.current = new Worker(new URL("../workers/indexedDBWorker.ts", import.meta.url), { type: "module" });
             workerRef.current.onmessage = (event) => {
                 const { action, filename, success, blob, error, allData } = event.data;
+                if (error) toast.error(error);
                 switch (action) {
+                    case "writeComplete":
+                        if (!success) toast.error(`Failed to save part of "${filename}".`);
+                        break;
                     case "getFileCountFromIndexedDB":
                         if (allData) setDatasets(allData);
+                        // The worker handles messages in order, so this reply
+                        // means every write from stopRecording has finished.
+                        if (savePendingRef.current) {
+                            savePendingRef.current = false;
+                            setIsProcessingRecording(false);
+                            if (!error) toast.success("Recording saved.");
+                        }
                         break;
                     case "saveDataByFilename":
                         if (blob) { saveAs(blob, filename); toast.success(`File "${filename}" downloaded.`); }
-                        else if (error) toast.error(`Error downloading: ${error}`);
                         setIsDownloadingFile((p) => ({ ...p, [filename]: false }));
                         break;
                     case "saveAsZip":
                         if (blob) { saveAs(blob, "NPG-Lite-Recordings.zip"); toast.success("Downloaded ZIP."); }
-                        else if (error) toast.error(`Error creating ZIP: ${error}`);
                         setIsDownloadingAll(false);
                         break;
                     case "deleteFile":
@@ -316,7 +390,7 @@ const NPG_Ble = () => {
             badge.className = "absolute left-2 top-1 text-xs font-medium rounded px-1.5 py-0.5 z-10";
             const dot = rt ? deviceChipColors[rt.index % deviceChipColors.length] : "#888";
             badge.style.color = dot;
-            badge.innerText = rt ? `D${rt.index + 1} · Ch${globalChannel}` : `Ch${globalChannel}`;
+            badge.innerText = rt ? `D${rt.index + 1} · CH${globalChannel + 1}` : `CH${globalChannel + 1}`;
 
             wrapper.appendChild(badge);
             wrapper.appendChild(canvas);
@@ -378,7 +452,11 @@ const NPG_Ble = () => {
         accelSweepPos.current = 0;
     }, [timeBase, activeTheme]);
 
-    useEffect(() => { createCanvasElements(); }, [selectedChannels, timeBase, Zoom, activeTheme, refreshKey, createCanvasElements]);
+    useEffect(() => { createCanvasElements(); }, [selectedChannels, timeBase, activeTheme, refreshKey, createCanvasElements]);
+    // Zoom only rescales the existing plots, so the visible trace is kept.
+    useEffect(() => {
+        wglPlotsRef.current.forEach((p) => { p.gScaleY = Zoom; p.update(); });
+    }, [Zoom]);
     useEffect(() => { if (isConnected) createAccelCanvas(); }, [isConnected, timeBase, activeTheme, refreshKey, createAccelCanvas]);
 
     useEffect(() => {
@@ -473,13 +551,12 @@ const NPG_Ble = () => {
             );
         }
 
-        plotDeviceSample(rt, values);
+        if (pauseRef.current) plotDeviceSample(rt, values);
 
         if (isRecordingRef.current) {
             rt.recBuffer.push([counter, ...values]);
+            recRowsRef.current++;
             if (rt.recBuffer.length >= REC_FLUSH_SIZE) flushDeviceBuffer(rt);
-            const elapsed = Date.now() - recordingStartTimeRef.current;
-            setRecordingElapsedTime(elapsed);
         }
         rt.samplesReceived++;
     };
@@ -501,7 +578,7 @@ const NPG_Ble = () => {
     };
 
     const handleIMUFor = (rt: DeviceRuntime) => (event: Event) => {
-        if (accelDeviceIdRef.current !== rt.id) return;
+        if (accelDeviceIdRef.current !== rt.id || !pauseRef.current) return;
         const t = event.target as CharValue;
         if (!t.value) return;
         processIMUBatch(new DataView(t.value.buffer));
@@ -641,6 +718,8 @@ const NPG_Ble = () => {
             }
             setRefreshKey((k) => k + 1);
             if (!silent) toast.success(`${rt.name} removed`);
+            // the stop button is hidden once no device is left
+            if (isRecordingRef.current && devicesRef.current.length === 0) stopRecording();
         }
     };
 
@@ -679,20 +758,54 @@ const NPG_Ble = () => {
             rt.recFileName = `${safePrefix(rt.name)}-D${rt.index + 1}-ChordsWeb-${stamp}.csv`;
         });
         recordingStartTimeRef.current = Date.now();
+        recRowsRef.current = 0;
+        endTimeRef.current = null;
+        setEndTime(null);
+        setCustomEndTime("");
         setRecordingElapsedTime(0);
         isRecordingRef.current = true;
         setIsRecord(false);
     };
 
     const stopRecording = async () => {
+        if (!isRecordingRef.current) return;
         isRecordingRef.current = false;
         setIsRecord(true);
-        setIsProcessingRecording(true);
+        setIsEndTimeOpen(false);
         devicesRef.current.forEach((rt) => flushDeviceBuffer(rt, true));
         setRecordingElapsedTime(0);
         recordingStartTimeRef.current = 0;
-        // give the worker a moment, then refresh list
-        setTimeout(() => { getFileCount(); setIsProcessingRecording(false); toast.success("Recording saved."); }, 300);
+        if (recRowsRef.current === 0) {
+            toast.error("Nothing was recorded: no samples arrived from the device.");
+            return;
+        }
+        setIsProcessingRecording(true);
+        savePendingRef.current = true;
+        getFileCount();
+    };
+
+    // Timer + end-time check. Runs on an interval so the sample path, which
+    // fires ~500 times a second per device, never triggers a re-render.
+    useEffect(() => {
+        if (!isRecording) return;
+        const id = setInterval(() => {
+            const elapsed = Date.now() - recordingStartTimeRef.current;
+            setRecordingElapsedTime(elapsed);
+            if (elapsed >= (endTimeRef.current ?? MAX_RECORDING_MS)) stopRecording();
+        }, 500);
+        return () => clearInterval(id);
+    }, [isRecording]);
+
+    const applyEndTime = (minutes: number | null) => {
+        const ms = minutes === null ? null : minutes * 60000;
+        if (ms !== null && ms <= recordingElapsedTime) {
+            toast.error("End time must be later than the current recording time.");
+            return;
+        }
+        endTimeRef.current = ms;
+        setEndTime(ms);
+        setCustomEndTime("");
+        setIsEndTimeOpen(false);
     };
 
     const saveByFilename = (filename: string) => {
@@ -727,6 +840,10 @@ const NPG_Ble = () => {
         manuallySelectedRef.current = false;
         setSelectedChannels(Array.from({ length: totalChannelsRef.current }, (_, i) => i));
     };
+    const resetChannels = () => {
+        manuallySelectedRef.current = true;
+        setSelectedChannels([0]);
+    };
     const selectDeviceChannels = (rt: DeviceMeta, on: boolean) => {
         manuallySelectedRef.current = true;
         const range = Array.from({ length: rt.maxChannels }, (_, i) => rt.offset + i);
@@ -741,8 +858,9 @@ const NPG_Ble = () => {
     // ================= misc UI helpers =================
     const togglePause = () => { const v = !isDisplay; setIsDisplay(v); pauseRef.current = v; if (v) startAnim(); };
     const formatTime = (ms: number) => {
-        const d = new Date(ms);
-        return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}:${String(d.getUTCSeconds()).padStart(2, "0")}`;
+        const total = Math.floor(ms / 1000);
+        return [Math.floor(total / 3600), Math.floor((total % 3600) / 60), total % 60]
+            .map((n) => String(n).padStart(2, "0")).join(":");
     };
     const batteryIcon = (level: number | null) => {
         if (level === null) return <BatteryWarning size={18} />;
@@ -752,9 +870,18 @@ const NPG_Ble = () => {
         return <BatteryFull size={18} className="text-green-500" />;
     };
 
-    const exgLabel: Record<number, string> = { 0: "Off", 4: "EMG", 1: "ECG", 2: "EOG", 3: "EEG" };
-    const notchLabel: Record<number, string> = { 0: "Off", 1: "50Hz", 2: "60Hz" };
     const allChannels = Array.from({ length: totalChannelsRef.current }, (_, i) => i);
+    const allSelected = allChannels.length > 0 && selectedChannels.length === allChannels.length;
+    // Same 8-column grid as Chords: at least two rows, unused cells greyed out.
+    const channelCells = Math.max(16, Math.ceil(allChannels.length / 8) * 8);
+    const channelColor = (g: number) => {
+        const colors = activeTheme === "dark" ? darkThemeColors : lightThemeColors;
+        return colors[g % colors.length];
+    };
+    const commonValue = (applied: { [g: number]: number }) => {
+        const first = applied[0] || 0;
+        return allChannels.every((g) => (applied[g] || 0) === first) ? first : null;
+    };
 
     return (
         <div className="flex flex-col h-[100dvh] overflow-hidden bg-g">
@@ -773,13 +900,13 @@ const NPG_Ble = () => {
                             <div key={m.id} className="flex items-center gap-1.5 shrink-0 rounded-full border border-border pl-2 pr-1 py-0.5 bg-g">
                                 <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: deviceChipColors[m.index % deviceChipColors.length] }} />
                                 <span className="text-xs font-medium max-w-[9rem] truncate" title={m.name}>{m.name}</span>
-                                <span className="text-[10px] text-gray-500">Ch{m.offset}-{m.offset + m.maxChannels - 1}</span>
+                                <span className="text-[10px] text-gray-500">CH{m.offset + 1}–{m.offset + m.maxChannels}</span>
                                 {m.hasBattery && (
                                     <span className="flex items-center gap-0.5 text-[10px]">
                                         {batteryIcon(m.battery)}{m.battery !== null ? `${m.battery}%` : ""}
                                     </span>
                                 )}
-                                <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => removeDevice(m.id)} aria-label="Remove">
+                                <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => removeDevice(m.id)} disabled={isRecording} aria-label="Remove">
                                     <CircleX size={14} />
                                 </Button>
                             </div>
@@ -788,11 +915,11 @@ const NPG_Ble = () => {
                 </div>
 
                 <div className="flex items-center gap-2 shrink-0">
-                    <Button onClick={addDevice} disabled={isAdding} className="rounded-xl gap-1 h-8 px-3 text-sm font-semibold">
+                    <Button onClick={addDevice} disabled={isAdding || isRecording} className="rounded-xl gap-1 h-8 px-3 text-sm font-semibold">
                         {isAdding ? "Pairing…" : (<><Plus size={15} /> Add device</>)}
                     </Button>
                     <Button variant="ghost" size="icon" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label="Theme">
-                        {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+                        {mounted && (theme === "dark" ? <Sun size={17} /> : <Moon size={17} />)}
                     </Button>
                 </div>
             </header>
@@ -810,7 +937,7 @@ const NPG_Ble = () => {
                         <p className="text-sm text-gray-500 max-w-md">
                             Click <span className="font-medium">Add device</span> and pick an NPG-Lite band.
                             Add 3, 4 or more — every device&apos;s channels appear in this one plot,
-                            numbered continuously (device 1 → 0,1,2; device 2 → 3,4,5; …).
+                            numbered continuously (device 1 → 1,2,3; device 2 → 4,5,6; …).
                         </p>
                     </div>
                 )}
@@ -837,168 +964,223 @@ const NPG_Ble = () => {
             )}
 
             {/* ---------------- control bar ---------------- */}
-            <div className="flex-none flex items-center justify-center gap-2 px-3 py-2 bg-g border-t border-border relative">
-                {isRecordingRef.current && (
-                    <div className="absolute left-3 flex items-center">
-                        <span className="px-2 py-1 rounded-lg bg-primary text-destructive text-sm min-w-[84px] text-center">
-                            {formatTime(recordingElapsedTime)}
-                        </span>
-                    </div>
-                )}
-
-                <TooltipProvider>
-                    <Tooltip>
-                        <TooltipTrigger asChild>
-                            <Button className="rounded-xl" onClick={togglePause} disabled={!isConnected || !isRecord}>
-                                {isDisplay ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
-                            </Button>
-                        </TooltipTrigger>
-                        <TooltipContent><p>{isDisplay ? "Pause display" : "Resume display"}</p></TooltipContent>
-                    </Tooltip>
-                </TooltipProvider>
-
-                <TooltipProvider>
-                    <Tooltip>
-                        <TooltipTrigger asChild>
-                            <Button className="rounded-xl" onClick={handleRecord} disabled={!isConnected || isProcessingRecording}>
-                                {isProcessingRecording ? <Loader2 className="animate-spin" /> : isRecordingRef.current ? <CircleStop /> : <Circle fill="red" />}
-                            </Button>
-                        </TooltipTrigger>
-                        <TooltipContent><p>{isRecordingRef.current ? "Stop recording" : "Start recording"}</p></TooltipContent>
-                    </Tooltip>
-                </TooltipProvider>
-
-                {/* recordings */}
-                <Popover>
-                    <PopoverTrigger asChild>
-                        <Button className="rounded-xl"><FileArchive size={16} /></Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="p-4 rounded-xl w-80 max-h-80 overflow-y-auto">
-                        <div className="space-y-3">
-                            {datasets.length > 0 ? datasets.map((d) => (
-                                <div key={d} className="flex justify-between items-center gap-2">
-                                    <span className="text-xs truncate" title={d}>{d}</span>
-                                    <div className="flex gap-1 shrink-0">
-                                        <Button size="sm" className="rounded-lg px-3" onClick={() => saveByFilename(d)} disabled={isDownloadingFile[d]}>
-                                            {isDownloadingFile[d] ? <Loader2 className="animate-spin h-4 w-4" /> : <Download size={15} />}
-                                        </Button>
-                                        <Button size="sm" className="rounded-lg px-3" onClick={() => deleteByFilename(d)} disabled={isDeletingFile[d]}>
-                                            {isDeletingFile[d] ? <Loader2 className="animate-spin h-4 w-4" /> : <Trash2 size={15} />}
-                                        </Button>
-                                    </div>
-                                </div>
-                            )) : <p className="text-sm">No recordings yet.</p>}
-                            {datasets.length > 0 && (
-                                <div className="flex gap-2 pt-2">
-                                    <Button size="sm" className="rounded-lg flex-1" onClick={saveAllZip} disabled={isDownloadingAll}>
-                                        {isDownloadingAll ? <Loader2 className="animate-spin h-4 w-4" /> : <><Download size={15} className="mr-1" />ZIP</>}
+            <TooltipProvider>
+                <div className="flex-none flex flex-wrap items-center justify-center gap-3 px-4 py-3 bg-g relative min-h-[64px]">
+                    {isRecording && (
+                        <div className="absolute left-4 flex items-center gap-1">
+                            <span className="flex items-center justify-center h-10 px-2 min-w-20 rounded-xl bg-primary text-destructive select-none whitespace-nowrap text-sm font-medium">
+                                {formatTime(recordingElapsedTime)}
+                            </span>
+                            <Separator orientation="vertical" className="bg-primary h-9" />
+                            <Popover open={isEndTimeOpen} onOpenChange={setIsEndTimeOpen}>
+                                <PopoverTrigger asChild>
+                                    <Button variant="destructive" className="px-2 min-w-10 text-sm" aria-label="Set recording end time">
+                                        {endTime === null ? <InfinityIcon className="h-5 w-5" /> : formatTime(endTime)}
                                     </Button>
-                                    <Button size="sm" className="rounded-lg flex-1" onClick={deleteAll} disabled={isDeletingAll}>
-                                        {isDeletingAll ? <Loader2 className="animate-spin h-4 w-4" /> : <><Trash2 size={15} className="mr-1" />All</>}
-                                    </Button>
-                                </div>
-                            )}
-                        </div>
-                    </PopoverContent>
-                </Popover>
-
-                {/* channels */}
-                <Popover>
-                    <PopoverTrigger asChild>
-                        <Button className="rounded-xl gap-1" disabled={!isConnected}><ListChecks size={16} /><span className="hidden sm:inline text-sm">Channels</span></Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="p-4 rounded-xl w-72 max-h-80 overflow-y-auto">
-                        <div className="flex items-center justify-between mb-2">
-                            <span className="text-sm font-semibold">Display channels</span>
-                            <Button size="sm" variant="outline" className="rounded-lg" onClick={selectAllChannels}>All</Button>
-                        </div>
-                        <div className="space-y-3">
-                            {deviceList.map((m) => (
-                                <div key={m.id}>
-                                    <div className="flex items-center gap-1.5 mb-1">
-                                        <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: deviceChipColors[m.index % deviceChipColors.length] }} />
-                                        <span className="text-xs font-medium truncate">{m.name}</span>
-                                        <button className="ml-auto text-[11px] underline" onClick={() => selectDeviceChannels(m, true)}>on</button>
-                                        <button className="text-[11px] underline" onClick={() => selectDeviceChannels(m, false)}>off</button>
-                                    </div>
-                                    <div className="flex flex-wrap gap-1">
-                                        {Array.from({ length: m.maxChannels }, (_, i) => m.offset + i).map((g) => (
-                                            <button
-                                                key={g}
-                                                onClick={() => toggleChannel(g)}
-                                                className={`text-xs px-2 py-1 rounded-lg border ${selectedChannels.includes(g) ? "bg-primary text-destructive border-primary" : "border-border"}`}
-                                            >
-                                                {g}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    </PopoverContent>
-                </Popover>
-
-                {/* filters */}
-                <Popover>
-                    <PopoverTrigger asChild>
-                        <Button className="rounded-xl gap-1" disabled={!isConnected || !isDisplay}><SlidersHorizontal size={16} /><span className="hidden sm:inline text-sm">Filters</span></Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="p-4 rounded-xl w-80 max-h-80 overflow-y-auto">
-                        <div className="mb-3 pb-2 border-b border-border">
-                            <div className="text-xs font-semibold mb-1">All channels</div>
-                            <div className="flex items-center gap-1 mb-1">
-                                <span className="text-[11px] w-12 text-gray-500">Type</span>
-                                {[0, 4, 1, 2, 3].map((t) => (
-                                    <button key={t} onClick={() => setEXGAll(t)} className="text-[11px] px-1.5 py-0.5 rounded border border-border">{exgLabel[t]}</button>
-                                ))}
-                            </div>
-                            <div className="flex items-center gap-1">
-                                <span className="text-[11px] w-12 text-gray-500">Notch</span>
-                                {[0, 1, 2].map((t) => (
-                                    <button key={t} onClick={() => setNotchAll(t)} className="text-[11px] px-1.5 py-0.5 rounded border border-border">{notchLabel[t]}</button>
-                                ))}
-                            </div>
-                        </div>
-                        <div className="space-y-2">
-                            {allChannels.map((g) => {
-                                const rt = deviceList.find((m) => g >= m.offset && g < m.offset + m.maxChannels);
-                                return (
-                                    <div key={g} className="flex items-center gap-1">
-                                        <span className="text-xs w-10 font-medium" style={{ color: rt ? deviceChipColors[rt.index % deviceChipColors.length] : undefined }}>Ch{g}</span>
-                                        <div className="flex gap-0.5">
-                                            {[0, 4, 1, 2, 3].map((t) => (
-                                                <button key={t} onClick={() => setEXG(g, t)} className={`text-[10px] px-1 py-0.5 rounded ${((appliedEXGFiltersRef.current[g] || 0) === t) ? "bg-primary text-destructive" : "border border-border"}`}>{exgLabel[t]}</button>
+                                </PopoverTrigger>
+                                <PopoverContent className="w-64 p-4 mx-4">
+                                    <div className="flex flex-col gap-4">
+                                        <div className="text-sm font-medium">Set End Time (minutes)</div>
+                                        <div className="grid grid-cols-4 gap-2">
+                                            {[1, 10, 20, 30].map((m) => (
+                                                <Button key={m} variant="outline" size="sm" onClick={() => applyEndTime(m)}>{m}</Button>
                                             ))}
                                         </div>
-                                        <div className="flex gap-0.5 ml-auto">
-                                            {[0, 1, 2].map((t) => (
-                                                <button key={t} onClick={() => setNotch(g, t)} className={`text-[10px] px-1 py-0.5 rounded ${((appliedNotchFiltersRef.current[g] || 0) === t) ? "bg-primary text-destructive" : "border border-border"}`}>{notchLabel[t]}</button>
-                                            ))}
+                                        <div className="flex gap-2 items-center">
+                                            <Input
+                                                inputMode="numeric"
+                                                placeholder="Custom"
+                                                value={customEndTime}
+                                                className="w-20"
+                                                onChange={(e) => setCustomEndTime(e.target.value.replace(/\D/g, ""))}
+                                                onKeyDown={(e) => { if (e.key === "Enter" && customEndTime) applyEndTime(Number(customEndTime)); }}
+                                            />
+                                            <Button variant="outline" size="sm" onClick={() => applyEndTime(null)} aria-label="No end time">
+                                                <InfinityIcon className="h-4 w-4" />
+                                            </Button>
                                         </div>
                                     </div>
-                                );
-                            })}
+                                </PopoverContent>
+                            </Popover>
                         </div>
-                    </PopoverContent>
-                </Popover>
+                    )}
 
-                {/* zoom + timebase */}
-                <Popover>
-                    <PopoverTrigger asChild>
-                        <Button className="rounded-xl text-sm" disabled={!isConnected}>View</Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="p-4 rounded-xl w-64">
-                        <div className="mb-3">
-                            <div className="flex justify-between text-xs mb-1"><span>Zoom</span><span>{Zoom.toFixed(1)}x</span></div>
-                            <input type="range" min={1} max={10} step={0.1} value={Zoom} onChange={(e) => setZoom(parseFloat(e.target.value))} className="w-full" />
-                        </div>
-                        <div>
-                            <div className="flex justify-between text-xs mb-1"><span>Time base</span><span>{timeBase}s</span></div>
-                            <input type="range" min={1} max={10} step={1} value={timeBase} onChange={(e) => setTimeBase(parseInt(e.target.value))} className="w-full" />
-                        </div>
-                    </PopoverContent>
-                </Popover>
-            </div>
+                    {isConnected && (
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <Button onClick={togglePause} disabled={isRecording} aria-label={isDisplay ? "Pause" : "Resume"}>
+                                    {isDisplay ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
+                                </Button>
+                            </TooltipTrigger>
+                            <TooltipContent><p>{isDisplay ? "Pause Data Display" : "Resume Data Display"}</p></TooltipContent>
+                        </Tooltip>
+                    )}
+
+                    {isConnected && (
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <Button onClick={handleRecord} disabled={!isDisplay || isProcessingRecording} aria-label={isRecording ? "Stop recording" : "Start recording"}>
+                                    {isProcessingRecording ? <Loader2 className="animate-spin" /> : isRecording ? <CircleStop /> : <Circle fill="red" />}
+                                </Button>
+                            </TooltipTrigger>
+                            <TooltipContent><p>{isRecording ? "Stop Recording" : "Start Recording"}</p></TooltipContent>
+                        </Tooltip>
+                    )}
+
+                    {/* recordings */}
+                    <Popover onOpenChange={(open) => { if (open) getFileCount(); }}>
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <PopoverTrigger asChild>
+                                    <Button className="p-4" aria-label="Recordings"><FileArchive size={16} /></Button>
+                                </PopoverTrigger>
+                            </TooltipTrigger>
+                            <TooltipContent><p>Recordings</p></TooltipContent>
+                        </Tooltip>
+                        <PopoverContent className="p-4 text-sm rounded-xl w-[28rem] max-w-[95vw] mx-4">
+                            <div className="space-y-4">
+                                <div className="max-h-[min(60vh,24rem)] overflow-y-auto space-y-3 pr-1">
+                                    {datasets.length > 0 ? datasets.map((d) => (
+                                        <div key={d} className="flex justify-between items-center gap-3">
+                                            <span className="min-w-0 break-all">{d}</span>
+                                            <div className="flex gap-2 shrink-0">
+                                                <Button className="px-4" onClick={() => saveByFilename(d)} disabled={isDownloadingFile[d]} aria-label={`Download ${d}`}>
+                                                    {isDownloadingFile[d] ? <Loader2 className="animate-spin h-4 w-4" /> : <Download size={16} />}
+                                                </Button>
+                                                <Button className="px-4" onClick={() => deleteByFilename(d)} disabled={isDeletingFile[d]} aria-label={`Delete ${d}`}>
+                                                    {isDeletingFile[d] ? <Loader2 className="animate-spin h-4 w-4" /> : <Trash2 size={16} />}
+                                                </Button>
+                                            </div>
+                                        </div>
+                                    )) : <p className="text-base">No datasets available</p>}
+                                </div>
+                                {datasets.length > 0 && (
+                                    <div className="flex gap-2">
+                                        <Button className="p-2 flex-1" onClick={saveAllZip} disabled={isDownloadingAll}>
+                                            {isDownloadingAll ? <Loader2 className="animate-spin h-4 w-4" /> : "Download All as Zip"}
+                                        </Button>
+                                        <Button className="p-2 flex-1" onClick={deleteAll} disabled={isDeletingAll}>
+                                            {isDeletingAll ? <Loader2 className="animate-spin h-4 w-4" /> : "Delete All"}
+                                        </Button>
+                                    </div>
+                                )}
+                            </div>
+                        </PopoverContent>
+                    </Popover>
+
+                    {/* filters */}
+                    {isConnected && (
+                        <Popover>
+                            <PopoverTrigger asChild>
+                                <Button className="px-3 min-w-12" disabled={!isDisplay || isRecording}>Filter</Button>
+                            </PopoverTrigger>
+                            <PopoverContent className="p-4 mx-4 w-auto max-w-[95vw]">
+                                <div className="flex flex-col gap-2 max-h-80 overflow-y-auto">
+                                    <div className="flex items-center gap-2 pb-2 border-b">
+                                        <div className="w-12 shrink-0"><ReplaceAll size={20} /></div>
+                                        <Segmented options={EXG_OPTIONS} value={commonValue(appliedEXGFiltersRef.current)} onChange={setEXGAll} />
+                                        <Segmented options={NOTCH_OPTIONS} value={commonValue(appliedNotchFiltersRef.current)} onChange={setNotchAll} />
+                                    </div>
+                                    {allChannels.map((g) => (
+                                        <div key={g} className="flex items-center gap-2">
+                                            <span className="w-12 shrink-0 text-sm font-semibold" style={{ color: channelColor(g) }}>CH{g + 1}</span>
+                                            <Segmented options={EXG_OPTIONS} value={appliedEXGFiltersRef.current[g] || 0} onChange={(t) => setEXG(g, t)} />
+                                            <Segmented options={NOTCH_OPTIONS} value={appliedNotchFiltersRef.current[g] || 0} onChange={(t) => setNotch(g, t)} />
+                                        </div>
+                                    ))}
+                                </div>
+                            </PopoverContent>
+                        </Popover>
+                    )}
+
+                    {/* channels + zoom + time base */}
+                    {isConnected && (
+                        <Popover>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <PopoverTrigger asChild>
+                                        <Button className="select-none rounded-lg" aria-label="Channel settings"><Settings size={16} /></Button>
+                                    </PopoverTrigger>
+                                </TooltipTrigger>
+                                <TooltipContent><p>Channel Settings</p></TooltipContent>
+                            </Tooltip>
+                            <PopoverContent className="w-[30rem] max-w-[95vw] p-4 rounded-md text-sm mx-4">
+                                <div className="space-y-5">
+                                    {isDisplay && !isRecording && (
+                                        <div>
+                                            <div className="flex items-center justify-between">
+                                                <h3 className="text-xs font-semibold text-gray-500">
+                                                    <span className="font-bold">Channels Count:</span> {selectedChannels.length}
+                                                </h3>
+                                                <button
+                                                    onClick={allSelected ? resetChannels : selectAllChannels}
+                                                    className="px-4 py-1 m-2 mr-0 text-xs font-light rounded-lg transition bg-primary text-primary-foreground hover:opacity-80"
+                                                >
+                                                    {allSelected ? "RESET" : "Select All"}
+                                                </button>
+                                            </div>
+                                            <div className="grid grid-cols-8 gap-2">
+                                                {Array.from({ length: channelCells }, (_, cell) => {
+                                                    const exists = cell < allChannels.length;
+                                                    const selected = selectedChannels.includes(cell);
+                                                    const lastRowStart = channelCells - 8;
+                                                    const corners = [
+                                                        cell === 0 && "rounded-tl-lg",
+                                                        cell === 7 && "rounded-tr-lg",
+                                                        cell === lastRowStart && "rounded-bl-lg",
+                                                        cell === channelCells - 1 && "rounded-br-lg",
+                                                    ].filter(Boolean).join(" ");
+                                                    const style = !exists
+                                                        ? activeTheme === "dark"
+                                                            ? { backgroundColor: "#030c21", color: "gray" }
+                                                            : { backgroundColor: "#e2e8f0", color: "gray" }
+                                                        : selected
+                                                            ? { backgroundColor: channelColor(cell), color: "white" }
+                                                            : { backgroundColor: "white", color: "black" };
+                                                    return (
+                                                        <button
+                                                            key={cell}
+                                                            disabled={!exists}
+                                                            aria-pressed={exists ? selected : undefined}
+                                                            onClick={() => toggleChannel(cell)}
+                                                            style={style}
+                                                            title={deviceList.find((m) => cell >= m.offset && cell < m.offset + m.maxChannels)?.name}
+                                                            className={`w-full h-8 text-xs font-medium py-1 border border-gray-300 dark:border-gray-600 transition-colors duration-200 ${corners}`}
+                                                        >
+                                                            CH{cell + 1}
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                            {deviceList.length > 1 && (
+                                                <div className="mt-3 space-y-1">
+                                                    {deviceList.map((m) => {
+                                                        const range = Array.from({ length: m.maxChannels }, (_, i) => m.offset + i);
+                                                        const on = range.every((g) => selectedChannels.includes(g));
+                                                        return (
+                                                            <div key={m.id} className="flex items-center gap-1.5 text-xs">
+                                                                <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: deviceChipColors[m.index % deviceChipColors.length] }} />
+                                                                <span className="truncate">{m.name}</span>
+                                                                <span className="text-gray-500 shrink-0">CH{m.offset + 1}–{m.offset + m.maxChannels}</span>
+                                                                <button className="ml-auto underline shrink-0" onClick={() => selectDeviceChannels(m, !on)}>{on ? "Hide" : "Show"}</button>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    <SliderRow label="Zoom Level" valueLabel={`${Zoom}x`} value={Zoom} onChange={setZoom} />
+                                    {isDisplay && (
+                                        <SliderRow label="Time Base" valueLabel={`${timeBase} Seconds`} value={timeBase} onChange={setTimeBase} />
+                                    )}
+                                </div>
+                            </PopoverContent>
+                        </Popover>
+                    )}
+                </div>
+            </TooltipProvider>
         </div>
     );
 };

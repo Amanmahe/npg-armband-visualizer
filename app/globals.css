@@ -3,29 +3,33 @@
 @tailwind utilities;
 
 :root {
-  --background: 210 40% 98%;
-  --foreground: 222 47% 11%;
-  --highlight: 214 32% 91%;
-  --primary: 199 89% 30%;
-  --primary-foreground: 0 0% 100%;
-  --destructive: 4 86% 51%;
-  --destructive-foreground: 0 0% 100%;
-  --input: 214 32% 85%;
+  --background: 0 0% 100%;
+  --foreground: 222.2 84% 4.9%;
+  --highlight: 0 0% 100%;
+  --gray-light: 0 0% 95%;
+  --primary: 222.2 47.4% 11.2%;
+  --primary-foreground: 210 40% 98%;
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 214.3 31.8% 91.4%;
+  --input: 214.3 31.8% 80%;
 }
 
 .dark {
-  --background: 222 47% 6%;
-  --foreground: 210 40% 96%;
-  --highlight: 217 33% 12%;
-  --primary: 199 89% 48%;
-  --primary-foreground: 222 47% 6%;
-  --destructive: 4 86% 58%;
-  --destructive-foreground: 0 0% 100%;
-  --input: 217 33% 20%;
+  --background: 222.2 84% 4.9%;
+  --foreground: 210 40% 98%;
+  --highlight: 222.2 84% 4.9%;
+  --gray-light: 222.2 84% 7%;
+  --primary: 210 40% 98%;
+  --primary-foreground: 222.2 47.4% 11.2%;
+  --destructive: 0 62.8% 30.6%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 217.2 32.6% 17.5%;
+  --input: 217.2 32.6% 25%;
 }
 
 * {
-  border-color: hsl(var(--input));
+  border-color: hsl(var(--border));
 }
 
 body {
@@ -34,5 +38,5 @@ body {
 }
 
 .bg-g {
-  background-color: hsl(var(--background));
+  background-color: hsl(var(--gray-light));
 }
